@@ -3,7 +3,7 @@
             [cheshire.core :as json]))
 
 (def local-url "http://localhost:8080")
-(def prod-url "")
+(def prod-url local-url)
 
 (defn url []
   (cond
