@@ -26,7 +26,7 @@
              (fn [tile-index character]
                [tile-index
                 (case character
-                  \x {:x tile-index :y row-index :weight 99}
+                  \x {:x tile-index :y row-index :weight 999}
                   \_ {:x tile-index :y row-index :weight 1}
                   {:x tile-index :y row-index :weight 0})])
              row))])
@@ -43,11 +43,13 @@
 (defn map-node
   [position map-data]
   (let [{:keys [x y]} position]
+    #_(prn :-> x y (get-in map-data [y x]))
     (get-in map-data [y x])))
 
 (defn calculate-weight
   [current from end]
-  (assoc current :route-weight (+ (:weight current) (:weight from) (heuristic current end))))
+  #_(println current from end)
+  (assoc current :route-weight (+ (:weight current) (:weight from) (:distance current) (heuristic current end))))
 
 (defn same-node?
   [{start-x :x start-y :y :as _current} {end-x :x end-y :y :as _end}]
@@ -71,6 +73,7 @@
         with-properties (mapv
                           #(-> %
                              (map-node map-data)
+                             (assoc :distance (-> current :distance inc))
                              (calculate-weight current end)
                              (assoc :from (select-keys current [:x :y])))
                           visited-removed)]
@@ -136,6 +139,7 @@
         (let [open-nodes (unvisited-neighbors current-node visited open-nodes end map-data)
               sorted-nodes (sort-by :route-weight < open-nodes)
               {:keys [y x]} current-node]
+          #_(let [_ (print-level-route tiles (construct-route current-node visited))])
           (if (or (same-node? current-node end)
                 (empty? sorted-nodes))
             (construct-route current-node visited)
@@ -144,6 +148,8 @@
               (assoc-in visited [y x] current-node)
               (first sorted-nodes)
               (inc steps)))))))
+
+
 
 (defn load-level
   "Processes level for pathfinding usage
@@ -219,7 +225,7 @@
       (let [{:keys [alive? last-move]} state
             current-server-state (api/game-state)
             next-move (decide-next-move current-server-state)
-            new-state ]
+            new-state []]
         (if-not alive?
           {}
           (recur new-state))))))
