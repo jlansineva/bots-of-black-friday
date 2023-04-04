@@ -25,10 +25,12 @@
            (map-indexed
              (fn [tile-index character]
                [tile-index
-                (case character
-                  \x {:x tile-index :y row-index :weight 999}
-                  \_ {:x tile-index :y row-index :weight 1}
-                  {:x tile-index :y row-index :weight 0})])
+                {:x tile-index
+                 :y row-index
+                 :weight (case character
+                           \x 999
+                           \_ 1
+                           0)}])
              row))])
       tiles)))
 
@@ -179,6 +181,10 @@
     (first
       (sort-by :discountPercent > (conj affordable-items current-item)))))
 
+(defn get-move-based-on-route
+  [route position]
+  )
+
 (defn decide-next-move
   "Depending on the current player state, decide the next move. Pick an item, move towards item,
   move towards potion or move towards exit"
@@ -210,7 +216,8 @@
         route-to-target (find-route
                           (get-in level [(:y position) (:x position)])
                           move-to
-                          level)]))
+                          level)]
+    (get-move-based-on-route route-to-target position)))
 
 (defn algo
   []
@@ -225,7 +232,7 @@
       (let [{:keys [alive? last-move]} state
             current-server-state (api/game-state)
             next-move (decide-next-move current-server-state)
-            new-state []]
+            new-state {:alive? alive? :last-move next-move}]
         (if-not alive?
           {}
           (recur new-state))))))
