@@ -7,9 +7,10 @@
 (def initial-state {})
 
 (defn generate-game-state
-  [initial-state map-data server-state]
+  [initial-state initial-fsm map-data server-state]
   (let [{:keys [player id]} server-state]
     (assoc initial-state
+      :logic-fsm initial-fsm
       :level (assoc map-data :exit (get-in server-state [:map :exit]))
       :alive? true
       :id id
@@ -185,6 +186,120 @@
   [route position]
   )
 
+(def effects {::no-op (constantly true)
+              ::move-to-closest-affordable-item (fn [game-state]
+                                                  (let [{:keys [purchase-candidates]}
+                                                        (process-targets (get-in game-state [:items]))]))
+              ::move-to-closest-potion (fn [game-state]
+                                         (let [{:keys [potions]}
+                                               (process-targets (get-in game-state [:items]))]))
+              ::move-to-exit (fn [game-state]
+                               )
+              ::pick-item #()})
+
+(def evaluations {::low-health (fn [game-state]
+                                 (let [health (get-in game-state [:player :health])]
+                                   (when health
+                                     (< health 30))))
+                  ::no-potions (fn [game-state]
+                                 (let [{:keys [potions]} (process-targets
+                                                           (get-in game-state [:items]))]
+                                   (empty? potions)))
+                  ::on-item (constantly false)
+                  ::enough-money (constantly false)
+                  ::affordable-items (constantly false)
+                  ::on-health (constantly false)
+                  ::item-picked (constantly false)
+                  ::no-money (constantly false)
+                  ::has-money (constantly false)
+                  ::potions-available (fn [game-state]
+                                        (let [{:keys [potions]} (process-targets
+                                                                  (get-in game-state [:items]))]
+                                          (seq potions)))})
+
+(def bot-logic-state
+  {:current {:state :idle
+             :effect ::no-op}
+   :states {:idle {:effect ::no-op
+                   :transitions [{:when [::low-health ::no-potions]
+                                  :switch :move-to-exit}
+                                 {:when [::low-health ::potions-available]
+                                  :switch :move-to-health}
+                                 {:when [::has-money ::affordable-items]
+                                  :switch :move-to-item}]}
+            :move-to-item {:effect ::move-to-closest-affordable-item
+                           :transitions [{:when [::low-health ::potions-available]
+                                          :switch :move-to-health}
+                                         {:when [::low-health ::no-potions]
+                                          :switch :move-to-exit}
+                                         {:when [::on-item ::enough-money]
+                                          :switch :pick-item}]}
+            :move-to-exit {:effect ::move-to-exit
+                           :transitions [{:when [::affordable-items]
+                                          :switch :move-to-item}]}
+            :move-to-health {:effect ::move-to-health
+                             :transitions [{:when [::on-health]
+                                            :switch :pick-item}]}
+            :pick-item {:effect ::pick-item
+                        :transitions [{:when [::item-picked ::no-money]
+                                       :switch :move-to-exit}
+                                      {:when [::item-picked ::has-money]
+                                       :switch :idle}]}}})
+
+(defn when-with-juxt
+  "TODO: some kind of indication if a evaluation is not found"
+  [fn-ids]
+  (let [fns (map #(comp boolean (get evaluations %)) fn-ids)]
+    (apply juxt fns)))
+
+(defn transitions-with-juxtapositions
+  "Creates juxtapositions function for each state transition
+
+  Takes evaluations per the keywords given in transitions :when -keyword
+  and applies juxt"
+  [[state-id state-properties]]
+  [state-id (update state-properties
+              :transitions
+              (fn [transitions]
+                (mapv #(update % :when when-with-juxt)
+                  transitions)))])
+
+(defn update-fsm-states
+  [states]
+  (into {}
+    (map transitions-with-juxtapositions)
+    states))
+
+(defn process-fsm
+  [fsm-initial]
+  (-> fsm-initial
+    (update :states update-fsm-states)))
+
+(comment
+  :signal :-> :machine :-> :effect
+
+  (process-fsm bot-logic-state)
+
+  (defn send-signal
+    "Takes a FSM and a signal (a state object)
+
+  Runs through transitions for current FSM state on the signal and returns a new FSM state"
+    [fsm signal]
+    (let [{:keys [current states]} fsm
+          current-state-id (:state current)
+          transitions (get-in states [current-state-id :transitions])]
+      (loop [{when-fn :when :as transition} (first transitions)
+             transitions (rest transitions)
+             signal signal]
+        (if (or (nil? transition)
+              (every? true? (when-fn signal)))
+          transition
+          (recur (first transitions) (rest transitions) signal)))))
+
+  (send-signal (process-fsm bot-logic-state) {:player {:health 21} :items [{:type "POTION"}]})
+
+  )
+
 (defn decide-next-move
   "Depending on the current player state, decide the next move. Pick an item, move towards item,
   move towards potion or move towards exit"
@@ -219,20 +334,27 @@
                           level)]
     (get-move-based-on-route route-to-target position)))
 
+(defn apply-effect
+  [state]
+  (let [effect {}]
+    state))
+
 (defn algo
   []
   (let [bot-name (gensym "shodan-") ;; generate unique bot name
         current-map (load-level (api/game-map))
         initial-server-state (api/register bot-name)
+        logic-fsm (process-fsm bot-logic-state)
         game-state (generate-game-state
                      initial-state
+                     logic-fsm
                      current-map
                      initial-server-state)]
     (loop [state game-state]
       (let [{:keys [alive? last-move]} state
             current-server-state (api/game-state)
             next-move (decide-next-move current-server-state)
-            new-state {:alive? alive? :last-move next-move}]
+            new-state (apply-effect state)]
         (if-not alive?
           {}
           (recur new-state))))))
