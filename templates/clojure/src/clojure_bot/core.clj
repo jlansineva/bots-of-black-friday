@@ -20,6 +20,7 @@
                         :alive? true)})))
 
 (defn process-map
+  "Reads the characters from the string-based map and translates them to weight values"
   [tiles]
   (into {}
     (map-indexed
@@ -54,10 +55,7 @@
 
 (defn calculate-weight
   [current from end]
-  #_(try)
-  #_(println current from end)
-  (assoc current :route-weight (+ (:weight current) (:weight from) (:distance current) (heuristic current end)))
-  #_(catch Exception e (log/log :calculate-weight-exception current from end)))
+  (assoc current :route-weight (+ (:weight current) (:weight from) (:distance current) (heuristic current end))))
 
 (defn same-node?
   [{start-x :x start-y :y :as _current} {end-x :x end-y :y :as _end}]
@@ -66,13 +64,8 @@
 
 (defn unvisited-neighbors
   [current visited open end map-data]
-  #_(try)
   (let [neighbors [(-> current (update :x inc))
-                   #_(-> current (update :x inc) (update :y inc))
-                   #_(-> current (update :x inc) (update :y dec))
                    (-> current (update :x dec))
-                   #_(-> current (update :x dec) (update :y inc))
-                   #_(-> current (update :x dec) (update :y dec))
                    (-> current (update :y inc))
                    (-> current (update :y dec))]
         visited-removed (into []
@@ -96,8 +89,7 @@
                    %)
                 with-properties)))
           open)
-        with-properties)))
-  #_(catch Exception e (log/log :unvisited-neighbors current end)))
+        with-properties))))
 
 (defn construct-route
   [end visited]
@@ -136,6 +128,7 @@
      (doall (map println drawn-route)))))
 
 (defn find-route
+  "A* implementation. Works only for x, y integer type data structures at the moment"
   [start end map-data]
   (log/log :find-route start end)
   (let [open-nodes (unvisited-neighbors start {} [] end map-data)
@@ -150,7 +143,6 @@
         (let [open-nodes (unvisited-neighbors current-node visited open-nodes end map-data)
               sorted-nodes (sort-by :route-weight < open-nodes)
               {:keys [y x]} current-node]
-          #_(let [_ (print-level-route tiles (construct-route current-node visited))])
           (if (or (same-node? current-node end)
                 (empty? sorted-nodes))
             (construct-route current-node visited)
@@ -164,7 +156,7 @@
   "Processes level for pathfinding usage
   Level becomes a {y {x value} hash-map
   0, 0 is at the top of the map"
-  [{:keys [tiles] :as map-data}]
+  [{:keys [tiles] :as _map-data}]
   (let [processed-map (process-map tiles)]
     processed-map))
 
@@ -374,6 +366,7 @@
     (apply juxt fns)))
 
 (defn juxtapose
+  "Process all transitions and compile them into a function"
   [transitions]
   (mapv #(update % :when when-with-juxt)
     transitions))
@@ -437,6 +430,7 @@
     (effect state)))
 
 (defn apply-post-effect
+  "Post-effect is an effect that is applied immediatly after a behavior transition"
   [state]
   (let [effect-id (get-in state [:player :local :behavior :current :post-effect])]
     (if effect-id
