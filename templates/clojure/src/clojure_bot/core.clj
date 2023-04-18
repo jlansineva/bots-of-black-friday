@@ -9,12 +9,14 @@
 (defn generate-game-state
   [initial-state initial-fsm map-data server-state]
   (let [{:keys [player id]} server-state]
+    (prn :generate-game-state player id)
     (assoc initial-state
-      :logic-fsm initial-fsm
       :level (assoc map-data :exit (get-in server-state [:map :exit]))
-      :alive? true
-      :id id
-      :player player)))
+      :player {:server player
+               :local (assoc player
+                        :behavior initial-fsm
+                        :id id
+                        :alive? true)})))
 
 (defn process-map
   [tiles]
@@ -45,14 +47,16 @@
 
 (defn map-node
   [position map-data]
+  #_(prn :map-node position (get-in map-data [(:y position) (:x position)]))
   (let [{:keys [x y]} position]
-    #_(prn :-> x y (get-in map-data [y x]))
     (get-in map-data [y x])))
 
 (defn calculate-weight
   [current from end]
+  #_(try)
   #_(println current from end)
-  (assoc current :route-weight (+ (:weight current) (:weight from) (:distance current) (heuristic current end))))
+  (assoc current :route-weight (+ (:weight current) (:weight from) (:distance current) (heuristic current end)))
+  #_(catch Exception e (prn :calculate-weight-exception current from end)))
 
 (defn same-node?
   [{start-x :x start-y :y :as _current} {end-x :x end-y :y :as _end}]
@@ -61,6 +65,7 @@
 
 (defn unvisited-neighbors
   [current visited open end map-data]
+  #_(try)
   (let [neighbors [(-> current (update :x inc))
                    #_(-> current (update :x inc) (update :y inc))
                    #_(-> current (update :x inc) (update :y dec))
@@ -76,7 +81,7 @@
         with-properties (mapv
                           #(-> %
                              (map-node map-data)
-                             (assoc :distance (-> current :distance inc))
+                             (assoc :distance (inc (get current :distance 0)))
                              (calculate-weight current end)
                              (assoc :from (select-keys current [:x :y])))
                           visited-removed)]
@@ -90,7 +95,8 @@
                    %)
                 with-properties)))
           open)
-        with-properties))))
+        with-properties)))
+  #_(catch Exception e (prn :unvisited-neighbors current end)))
 
 (defn construct-route
   [end visited]
@@ -130,6 +136,7 @@
 
 (defn find-route
   [start end map-data]
+  (prn :find-route start end)
   (let [open-nodes (unvisited-neighbors start {} [] end map-data)
         sorted-nodes (sort-by :route-weight < open-nodes)
         visited (assoc-in {} [(:y start) (:x start)] (assoc start :from nil))
@@ -152,8 +159,6 @@
               (first sorted-nodes)
               (inc steps)))))))
 
-
-
 (defn load-level
   "Processes level for pathfinding usage
   Level becomes a {y {x value} hash-map
@@ -173,29 +178,88 @@
   [price discount-percent]
   (- price (* price (/ discount-percent 100))))
 
+(defn affordable-items
+  [items money]
+  (prn :-> money)
+  (remove #(let [{:keys [price discountPercent]} %]
+             (> (discounted-price price discountPercent)
+               money))
+    items))
+
 (defn suitable-target
-  [items {:keys [money current-item]}]
-  (let [affordable-items (remove #(let [{:keys [price discountPercent]} %]
-                                    (> (discounted-price price discountPercent)
-                                      money))
-                           items)]
+  [items {:keys [money current-item] :as _player}]
+  (let [affordable-items (affordable-items items money)]
+    (prn :suitable-target #_#_affordable-items current-item (keep identity (conj affordable-items current-item)))
     (first
-      (sort-by :discountPercent > (conj affordable-items current-item)))))
+      (sort-by :discountPercent > (keep identity (conj affordable-items current-item))))))
+
+(def move-matrix {[0 1] "DOWN"
+                  [0 -1] "UP"
+                  [1 0] "RIGHT"
+                  [-1 0] "LEFT"})
 
 (defn get-move-based-on-route
   [route position]
-  )
+  (let [{px :x py :y} position
+        {rx :x ry :y} (first route)]
+    (get move-matrix [(- rx px) (- ry py)])))
 
-(def effects {::no-op (constantly true)
-              ::move-to-closest-affordable-item (fn [game-state]
-                                                  (let [{:keys [purchase-candidates]}
-                                                        (process-targets (get-in game-state [:items]))]))
-              ::move-to-closest-potion (fn [game-state]
-                                         (let [{:keys [potions]}
-                                               (process-targets (get-in game-state [:items]))]))
-              ::move-to-exit (fn [game-state]
-                               )
-              ::pick-item #()})
+(defn get-next-move
+  [{:keys [player level]
+    :as game-state} target]
+  (prn :get-next-move player target)
+  (let [position-local (get-in player [:local :position])
+        position-server (get-in player [:server :position])
+        _ (prn :get-next-move position-local position-server)
+        route-to-target (find-route
+                          (get-in level [(:y position-local) (:x position-local)])
+                          (:position target)
+                          level)
+        next-move (get-move-based-on-route route-to-target position-local)
+        ;; if position at server is different from local, we have moved and can send a next move
+        queue? true #_(or
+                 (not= (:x position-local) (:x position-server))
+                 (not= (:y position-local) (:y position-server)))]
+    (cond-> game-state
+      queue? (assoc-in [:player :local :position] position-server)
+      queue? (assoc-in [:action-queue] next-move))))
+
+(defn move-to-closest-affordable-item
+  [game-state]
+  (let [player (get-in game-state [:player :local])
+        {:keys [purchase-candidates]} (process-targets (get-in game-state [:items]))
+        best-target (suitable-target purchase-candidates player)]
+    (prn :move-to-closest-affordable-item best-target)
+    (get-next-move game-state best-target)))
+
+(defn move-to-closest-potion
+  [{:keys [player]
+    :as game-state}]
+  (let [{:keys [potions]} (process-targets (get-in game-state [:items]))
+        position-local (get-in player [:local :position])
+        potions-by-distance (map #(assoc % :estimated-distance (heuristic position-local (:position %))) potions)
+        best-target (sort-by :estimated-distance potions-by-distance)]
+    (get-next-move game-state best-target)))
+
+(defn move-to-exit
+  [{:keys [level] :as game-state}]
+  (let [best-target (get-in level [:exit])]
+    (get-next-move game-state best-target)))
+
+(defn pick-item
+  [game-state]
+  game-state)
+
+;; DATA ORIENTED DESCRIPTION
+;; TODO: Dispatch could be an effect
+
+(def effects {::no-op identity
+              ::move-to-closest-affordable-item move-to-closest-affordable-item
+              ::move-to-closest-potion move-to-closest-potion
+              ::move-to-exit move-to-exit
+              ::pick-item pick-item
+              ::dead (fn [game-state]
+                       (assoc-in game-state [:player :local :alive?] false))})
 
 (def evaluations {::low-health (fn [game-state]
                                  (let [health (get-in game-state [:player :health])]
@@ -207,25 +271,47 @@
                                    (empty? potions)))
                   ::on-item (constantly false)
                   ::enough-money (constantly false)
-                  ::affordable-items (constantly false)
+                  ::affordable-items (fn [game-state]
+                                       (let [{:keys [purchase-candidates]} (process-targets
+                                                                             (get-in game-state [:items]))]
+                                         (and
+                                           (seq purchase-candidates)
+                                           (seq (affordable-items purchase-candidates (get-in game-state [:player :local :money]))))))
+                  ::no-affordable-items (fn [game-state]
+                                          (let [{:keys [purchase-candidates]} (process-targets
+                                                                                (get-in game-state [:items]))]
+                                            (and
+                                              (seq purchase-candidates)
+                                              (nil? (seq (affordable-items purchase-candidates (get-in game-state [:player :local :money])))))))
                   ::on-health (constantly false)
                   ::item-picked (constantly false)
-                  ::no-money (constantly false)
-                  ::has-money (constantly false)
+                  ::dead (fn [game-state]
+                           (let [server-instance (get-in game-state [:player :server])]
+                             (nil? server-instance)))
+                  ::initialized (fn [game-state]
+                                  (some? (get-in game-state [:player :server])))
                   ::potions-available (fn [game-state]
                                         (let [{:keys [potions]} (process-targets
                                                                   (get-in game-state [:items]))]
                                           (seq potions)))})
 
 (def bot-logic-state
-  {:current {:state :idle
+  {:pre {:transitions [{:when [::dead ::initialized]
+                        :switch :dead}]}
+   :current {:state :waiting-for-init
              :effect ::no-op}
-   :states {:idle {:effect ::no-op
+   :last {:state nil}
+   :states {:dead {:effect ::dead
+                   :transitions []}
+            :waiting-for-init {:effect ::no-op
+                               :transitions [{:when [::initialized]
+                                              :switch :idle}]}
+            :idle {:effect ::no-op
                    :transitions [{:when [::low-health ::no-potions]
                                   :switch :move-to-exit}
                                  {:when [::low-health ::potions-available]
                                   :switch :move-to-health}
-                                 {:when [::has-money ::affordable-items]
+                                 {:when [::affordable-items]
                                   :switch :move-to-item}]}
             :move-to-item {:effect ::move-to-closest-affordable-item
                            :transitions [{:when [::low-health ::potions-available]
@@ -241,9 +327,9 @@
                              :transitions [{:when [::on-health]
                                             :switch :pick-item}]}
             :pick-item {:effect ::pick-item
-                        :transitions [{:when [::item-picked ::no-money]
+                        :transitions [{:when [::item-picked ::no-affordable-items]
                                        :switch :move-to-exit}
-                                      {:when [::item-picked ::has-money]
+                                      {:when [::item-picked ::affordable-items]
                                        :switch :idle}]}}})
 
 (defn when-with-juxt
@@ -251,6 +337,11 @@
   [fn-ids]
   (let [fns (map #(comp boolean (get evaluations %)) fn-ids)]
     (apply juxt fns)))
+
+(defn juxtapose
+  [transitions]
+  (mapv #(update % :when when-with-juxt)
+    transitions))
 
 (defn transitions-with-juxtapositions
   "Creates juxtapositions function for each state transition
@@ -260,9 +351,7 @@
   [[state-id state-properties]]
   [state-id (update state-properties
               :transitions
-              (fn [transitions]
-                (mapv #(update % :when when-with-juxt)
-                  transitions)))])
+              juxtapose)])
 
 (defn update-fsm-states
   [states]
@@ -273,75 +362,68 @@
 (defn process-fsm
   [fsm-initial]
   (-> fsm-initial
+    (update-in [:pre :transitions] juxtapose)
     (update :states update-fsm-states)))
 
-(comment
-  :signal :-> :machine :-> :effect
-
-  (process-fsm bot-logic-state)
-
-  (defn send-signal
-    "Takes a FSM and a signal (a state object)
+(defn update-entity-behaviors
+  "Takes a FSM and a signal (a state object)
 
   Runs through transitions for current FSM state on the signal and returns a new FSM state"
-    [fsm signal]
-    (let [{:keys [current states]} fsm
-          current-state-id (:state current)
-          transitions (get-in states [current-state-id :transitions])]
-      (loop [{when-fn :when :as transition} (first transitions)
-             transitions (rest transitions)
-             signal signal]
-        (if (or (nil? transition)
-              (every? true? (when-fn signal)))
-          transition
-          (recur (first transitions) (rest transitions) signal)))))
+  [fsm signal]
+  (prn :update-entity-behaviors fsm)
+  (let [{:keys [current states pre]} fsm
+        current-state-id (:state current)
+        pre-transitions (get-in pre [:transitions])
+        transitions (into [] (concat pre-transitions (get-in states [current-state-id :transitions])))
+        transition (loop [{when-fn :when :as transition} (first transitions)
+                          transitions (rest transitions)
+                          signal signal]
+                     (if (or (nil? transition)
+                           (every? true? (when-fn signal)))
+                       transition
+                       (recur (first transitions) (rest transitions) signal)))]
+    (if (some? transition)
+      (-> fsm
+        (assoc-in [:current :state] (:switch transition))
+        (assoc-in [:current :effect] (get-in fsm [:states (:switch transition) :effect])))
+      fsm)))
 
-  (send-signal (process-fsm bot-logic-state) {:player {:health 21} :items [{:type "POTION"}]})
-
-  )
+(defn apply-behavior
+  [state]
+  (let [effect-id (get-in state [:player :local :behavior :current :effect])
+        effect (get effects effect-id )]
+    (prn :apply-behavior effect-id)
+    (effect state)))
 
 (defn decide-next-move
   "Depending on the current player state, decide the next move. Pick an item, move towards item,
   move towards potion or move towards exit"
-  [{:keys [items player level] :as server-state}]
-  (let [{:keys [health position]} player
-        low-health? (< health 30)
-        {:keys [potions purchase-candidates]} (process-targets items)
-        best-target (suitable-target purchase-candidates player)
-        move-to (cond
-                  ;; no currently affordable items and there are no potions on map -> move to exit
-                  (and (nil? best-target)
-                    (empty? potions)) (-> level :exit)
-
-                  ;; no currently affordable items and there are potions -> grab a potion
-                  (and (nil? best-target)
-                    (seq potions)) (first potions)
-
-                  ;; low health but there potions -> grab a potion
-                  (and low-health?
-                    (seq potions)) (first potions)
-
-                  ;; low health and no potions -> move towards exit
-                  (and low-health?
-                    (empty? potions)) (-> level :exit)
-
-                  ;; get the best target
-                  :else
-                  best-target)
-        route-to-target (find-route
-                          (get-in level [(:y position) (:x position)])
-                          move-to
-                          level)]
-    (get-move-based-on-route route-to-target position)))
-
-(defn apply-effect
   [state]
-  (let [effect {}]
-    state))
+  (update-in state [:player :local :behavior] update-entity-behaviors state))
+
+(defn update-game-state-with-latest-server-state
+  [state {:keys [players items] :as _server-state}]
+  (let [local-name (get-in state [:player :local :name])
+        server-instance (some #(when (= (:name %) local-name) %) players)]
+    (prn :update-game-state-with-latest-server-state players local-name server-instance)
+    (-> state
+      (assoc :items items)
+      (assoc-in [:player :server] server-instance) )))
+
+(defn dispatch-move
+  "Fires a side-effect into the API if necessary"
+  [{:keys [action-queue] :as state}]
+  (prn :dispatch-move action-queue)
+  (let [id (get-in state [:player :local :id])]
+    (or
+      (when action-queue
+        (api/move id action-queue)
+        (dissoc state :action-queue))
+      state)))
 
 (defn algo
   []
-  (let [bot-name (gensym "shodan-") ;; generate unique bot name
+  (let [bot-name (str (gensym "shodan-")) ;; generate unique bot name
         current-map (load-level (api/game-map))
         initial-server-state (api/register bot-name)
         logic-fsm (process-fsm bot-logic-state)
@@ -351,13 +433,19 @@
                      current-map
                      initial-server-state)]
     (loop [state game-state]
-      (let [{:keys [alive? last-move]} state
+      (let [{:keys [player]} state
+            {{:keys [alive?]} :local} player
             current-server-state (api/game-state)
-            next-move (decide-next-move current-server-state)
-            new-state (apply-effect state)]
+            new-state (-> state
+                        (update-game-state-with-latest-server-state current-server-state)
+                        (decide-next-move)
+                        (apply-behavior)
+                        (dispatch-move))]
         (if-not alive?
           {}
           (recur new-state))))))
+
+(comment )
 
 (defn -main
   [& args]
