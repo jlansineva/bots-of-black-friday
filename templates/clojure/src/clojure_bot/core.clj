@@ -1,5 +1,6 @@
 (ns clojure-bot.core
   (:require [clojure-bot.api :as api]
+            [clojure-bot.log :as log]
             [clojure.math :as math]
             [clojure.string :as str])
   (:gen-class))
@@ -9,7 +10,7 @@
 (defn generate-game-state
   [initial-state initial-fsm map-data server-state]
   (let [{:keys [player id]} server-state]
-    (prn :generate-game-state player id)
+    (log/log :generate-game-state player id)
     (assoc initial-state
       :level (assoc map-data :exit (get-in server-state [:map :exit]))
       :player {:server player
@@ -47,7 +48,7 @@
 
 (defn map-node
   [position map-data]
-  #_(prn :map-node position (get-in map-data [(:y position) (:x position)]))
+  (log/log :map-node position (get-in map-data [(:y position) (:x position)]))
   (let [{:keys [x y]} position]
     (get-in map-data [y x])))
 
@@ -56,7 +57,7 @@
   #_(try)
   #_(println current from end)
   (assoc current :route-weight (+ (:weight current) (:weight from) (:distance current) (heuristic current end)))
-  #_(catch Exception e (prn :calculate-weight-exception current from end)))
+  #_(catch Exception e (log/log :calculate-weight-exception current from end)))
 
 (defn same-node?
   [{start-x :x start-y :y :as _current} {end-x :x end-y :y :as _end}]
@@ -96,7 +97,7 @@
                 with-properties)))
           open)
         with-properties)))
-  #_(catch Exception e (prn :unvisited-neighbors current end)))
+  #_(catch Exception e (log/log :unvisited-neighbors current end)))
 
 (defn construct-route
   [end visited]
@@ -136,7 +137,7 @@
 
 (defn find-route
   [start end map-data]
-  (prn :find-route start end)
+  (log/log :find-route start end)
   (let [open-nodes (unvisited-neighbors start {} [] end map-data)
         sorted-nodes (sort-by :route-weight < open-nodes)
         visited (assoc-in {} [(:y start) (:x start)] (assoc start :from nil))
@@ -180,7 +181,7 @@
 
 (defn affordable-items
   [items money]
-  (prn :-> money)
+  (log/log :-> money)
   (remove #(let [{:keys [price discountPercent]} %]
              (> (discounted-price price discountPercent)
                money))
@@ -189,7 +190,7 @@
 (defn suitable-target
   [items {:keys [money current-item] :as _player}]
   (let [affordable-items (affordable-items items money)]
-    (prn :suitable-target #_#_affordable-items current-item (keep identity (conj affordable-items current-item)))
+    (log/log :suitable-target #_#_affordable-items current-item (keep identity (conj affordable-items current-item)))
     (first
       (sort-by :discountPercent > (keep identity (conj affordable-items current-item))))))
 
@@ -207,10 +208,10 @@
 (defn get-next-move
   [{:keys [player level]
     :as game-state} target]
-  (prn :get-next-move player target)
+  (log/log :get-next-move player target)
   (let [position-local (get-in player [:local :position])
         position-server (get-in player [:server :position])
-        _ (prn :get-next-move position-local position-server)
+        _ (log/log :get-next-move position-local position-server)
         route-to-target (find-route
                           (get-in level [(:y position-local) (:x position-local)])
                           (:position target)
@@ -221,6 +222,7 @@
                  (not= (:x position-local) (:x position-server))
                  (not= (:y position-local) (:y position-server)))]
     (cond-> game-state
+      true (assoc-in [:player :local :current-target] target)
       queue? (assoc-in [:player :local :position] position-server)
       queue? (assoc-in [:action-queue] next-move))))
 
@@ -229,7 +231,7 @@
   (let [player (get-in game-state [:player :local])
         {:keys [purchase-candidates]} (process-targets (get-in game-state [:items]))
         best-target (suitable-target purchase-candidates player)]
-    (prn :move-to-closest-affordable-item best-target)
+    (log/log :move-to-closest-affordable-item best-target)
     (get-next-move game-state best-target)))
 
 (defn move-to-closest-potion
@@ -238,7 +240,10 @@
   (let [{:keys [potions]} (process-targets (get-in game-state [:items]))
         position-local (get-in player [:local :position])
         potions-by-distance (map #(assoc % :estimated-distance (heuristic position-local (:position %))) potions)
-        best-target (sort-by :estimated-distance potions-by-distance)]
+        best-target (first (sort-by :estimated-distance potions-by-distance))]
+    (log/log :move-to-closest-potion :best-target best-target)
+    (log/log :move-to-closest-potion :potions-by-distance potions-by-distance)
+    (log/log :move-to-closest-potion :position-local position-local)
     (get-next-move game-state best-target)))
 
 (defn move-to-exit
@@ -248,7 +253,7 @@
 
 (defn pick-item
   [game-state]
-  game-state)
+  (assoc-in game-state [:action-queue] "PICK"))
 
 ;; DATA ORIENTED DESCRIPTION
 ;; TODO: Dispatch could be an effect
@@ -258,38 +263,65 @@
               ::move-to-closest-potion move-to-closest-potion
               ::move-to-exit move-to-exit
               ::pick-item pick-item
+              ::initialize (fn [game-state]
+                             (assoc-in game-state [:player :local :initialized?] true))
               ::dead (fn [game-state]
                        (assoc-in game-state [:player :local :alive?] false))})
 
 (def evaluations {::low-health (fn [game-state]
-                                 (let [health (get-in game-state [:player :health])]
+                                 (let [health (get-in game-state [:player :server :health])]
+                                   (log/log :low-health? health)
                                    (when health
-                                     (< health 30))))
+                                     (< health 70))))
                   ::no-potions (fn [game-state]
                                  (let [{:keys [potions]} (process-targets
                                                            (get-in game-state [:items]))]
                                    (empty? potions)))
-                  ::on-item (constantly false)
-                  ::enough-money (constantly false)
+                  ::on-item (fn [game-state]
+                              (let [{target-position :position} (get-in game-state [:player :local :current-target])
+                                    server-position (get-in game-state [:player :server :position])]
+
+                                (log/log :on-item? server-position (same-node? server-position target-position))
+                                (same-node? target-position server-position)))
+                  ::enough-money (fn [game-state]
+                                   (let [{:keys [price discountPercent]} (get-in game-state [:player :local :current-target])
+                                         money (get-in game-state [:player :server :money])]
+                                     (log/log :enough-money? money price discountPercent)
+                                     (when (and price discountPercent)
+                                       (> money (discounted-price price discountPercent)))))
                   ::affordable-items (fn [game-state]
                                        (let [{:keys [purchase-candidates]} (process-targets
                                                                              (get-in game-state [:items]))]
                                          (and
                                            (seq purchase-candidates)
-                                           (seq (affordable-items purchase-candidates (get-in game-state [:player :local :money]))))))
+                                           (seq (affordable-items purchase-candidates (get-in game-state [:player :server :money]))))))
                   ::no-affordable-items (fn [game-state]
                                           (let [{:keys [purchase-candidates]} (process-targets
                                                                                 (get-in game-state [:items]))]
                                             (and
                                               (seq purchase-candidates)
-                                              (nil? (seq (affordable-items purchase-candidates (get-in game-state [:player :local :money])))))))
-                  ::on-health (constantly false)
-                  ::item-picked (constantly false)
+                                              (nil? (seq (affordable-items purchase-candidates (get-in game-state [:player :server :money])))))))
+                  ::on-health (fn [game-state]
+                                (let [current-target (get-in game-state [:player :local :current-target :position])
+                                      server-position (get-in game-state [:player :server :position])]
+                                  (log/log :on-health? server-position current-target)
+                                  (same-node? current-target server-position)))
+                  ::item-picked (fn [game-state]
+                                  (let [items (get-in game-state [:items])
+                                        current-target (get-in game-state [:player :local :current-target :position])]
+                                    (nil? (some #(when (same-node? current-target (:position %)) %) items))))
                   ::dead (fn [game-state]
-                           (let [server-instance (get-in game-state [:player :server])]
-                             (nil? server-instance)))
+                           (let [server-instance (get-in game-state [:player :server])
+                                 alive? (get-in game-state [:player :local :alive?])]
+                             (log/log :dead? server-instance (nil? server-instance))
+                             (and
+                               alive?
+                               (nil? server-instance))))
                   ::initialized (fn [game-state]
-                                  (some? (get-in game-state [:player :server])))
+                                  (log/log :initialized? (get-in game-state [:player :local :initialized?]))
+                                  (true? (get-in game-state [:player :local :initialized?])))
+                  ::instance-found (fn [game-state]
+                                     (some? (get-in game-state [:player :server])))
                   ::potions-available (fn [game-state]
                                         (let [{:keys [potions]} (process-targets
                                                                   (get-in game-state [:items]))]
@@ -304,8 +336,9 @@
    :states {:dead {:effect ::dead
                    :transitions []}
             :waiting-for-init {:effect ::no-op
-                               :transitions [{:when [::initialized]
-                                              :switch :idle}]}
+                               :transitions [{:when [::instance-found]
+                                              :switch :idle
+                                              :post-effect ::initialize}]}
             :idle {:effect ::no-op
                    :transitions [{:when [::low-health ::no-potions]
                                   :switch :move-to-exit}
@@ -323,13 +356,15 @@
             :move-to-exit {:effect ::move-to-exit
                            :transitions [{:when [::affordable-items]
                                           :switch :move-to-item}]}
-            :move-to-health {:effect ::move-to-health
+            :move-to-health {:effect ::move-to-closest-potion
                              :transitions [{:when [::on-health]
                                             :switch :pick-item}]}
             :pick-item {:effect ::pick-item
                         :transitions [{:when [::item-picked ::no-affordable-items]
                                        :switch :move-to-exit}
                                       {:when [::item-picked ::affordable-items]
+                                       :switch :idle}
+                                      {:when [::item-picked ::potions-available]
                                        :switch :idle}]}}})
 
 (defn when-with-juxt
@@ -369,43 +404,62 @@
   "Takes a FSM and a signal (a state object)
 
   Runs through transitions for current FSM state on the signal and returns a new FSM state"
-  [fsm signal]
-  (prn :update-entity-behaviors fsm)
+  [fsm state]
+  #_(log/log :update-entity-behaviors fsm)
   (let [{:keys [current states pre]} fsm
         current-state-id (:state current)
+        _ (log/log :update-entity-behaviors current-state-id)
         pre-transitions (get-in pre [:transitions])
         transitions (into [] (concat pre-transitions (get-in states [current-state-id :transitions])))
         transition (loop [{when-fn :when :as transition} (first transitions)
                           transitions (rest transitions)
-                          signal signal]
+                          state state]
+                     #_(let [])
+                     (log/log :transitioning transition)
                      (if (or (nil? transition)
-                           (every? true? (when-fn signal)))
+                           (every? true? (when-fn state)))
                        transition
-                       (recur (first transitions) (rest transitions) signal)))]
+                       (recur (first transitions) (rest transitions) state)))]
     (if (some? transition)
-      (-> fsm
-        (assoc-in [:current :state] (:switch transition))
-        (assoc-in [:current :effect] (get-in fsm [:states (:switch transition) :effect])))
+      (do
+        (log/log :update-entity-behaviors-> current-state-id :-> (:switch transition))
+        (-> fsm
+          (assoc-in [:current :state] (:switch transition))
+          (assoc-in [:current :effect] (get-in fsm [:states (:switch transition) :effect]))
+          (assoc-in [:current :post-effect] (:post-effect transition))))
       fsm)))
 
 (defn apply-behavior
   [state]
   (let [effect-id (get-in state [:player :local :behavior :current :effect])
         effect (get effects effect-id )]
-    (prn :apply-behavior effect-id)
+    (log/log :apply-behavior effect-id)
     (effect state)))
+
+(defn apply-post-effect
+  [state]
+  (let [effect-id (get-in state [:player :local :behavior :current :post-effect])]
+    (if effect-id
+      (let [effect (get effects effect-id)]
+        (log/log :apply-post-effect effect-id)
+        (-> state
+          (effect)
+          (update-in [:player :local :behavior :current] dissoc :post-effect)))
+      state)))
 
 (defn decide-next-move
   "Depending on the current player state, decide the next move. Pick an item, move towards item,
   move towards potion or move towards exit"
   [state]
-  (update-in state [:player :local :behavior] update-entity-behaviors state))
+  (-> state
+    (update-in [:player :local :behavior] update-entity-behaviors state)
+    (apply-post-effect)))
 
 (defn update-game-state-with-latest-server-state
   [state {:keys [players items] :as _server-state}]
   (let [local-name (get-in state [:player :local :name])
         server-instance (some #(when (= (:name %) local-name) %) players)]
-    (prn :update-game-state-with-latest-server-state players local-name server-instance)
+    (log/log :update-game-state-with-latest-server-state players local-name server-instance)
     (-> state
       (assoc :items items)
       (assoc-in [:player :server] server-instance) )))
@@ -413,7 +467,7 @@
 (defn dispatch-move
   "Fires a side-effect into the API if necessary"
   [{:keys [action-queue] :as state}]
-  (prn :dispatch-move action-queue)
+  (log/log :dispatch-move action-queue)
   (let [id (get-in state [:player :local :id])]
     (or
       (when action-queue
